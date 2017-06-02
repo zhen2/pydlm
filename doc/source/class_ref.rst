@@ -1,4 +1,5 @@
-
+.. py:currentmodule:: pydlm
+		      
 Class Reference
 ===============
 
@@ -37,4 +38,10 @@ Class Reference
 -------------------
 
 .. autoclass:: pydlm.longSeason
+    :members:
+
+:class:`modelTuner`
+-------------------
+
+.. autoclass:: pydlm.modelTuner
     :members:

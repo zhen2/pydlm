@@ -16,7 +16,7 @@ from .dynamic import dynamic
 
 
 class autoReg(dynamic):
-    """ The autoReg class alows user to add an autoregressive component to the dlm.
+    """ The autoReg class allows user to add an autoregressive component to the dlm.
     This code implements the autoregressive component as a sub-class of
     dynamic. Different from the dynamic component, the features in the
     autoReg is generated from the data, and updated according to the data.
@@ -116,18 +116,6 @@ class autoReg(dynamic):
         if self.d >= self.n:
             raise NameError('The degree cannot be longer than the data series')
 
-    # check if there is any none data. We currently don't support missing data
-    # for auto regression.
-    def hasMissingData(self, aList):
-        """ Check whether the list contains None
-
-        """
-        for item in aList:
-            if item is None:
-                return True
-
-        return False
-
     # overide
     def updateEvaluation(self, date):
         if date < self.n:
@@ -226,6 +214,12 @@ class autoReg(dynamic):
         # if what modified is the last day, we need to update last day
         if date == self.n - 1:
             self.lastDay = dataPoint
+
+        if dataPoint is None:
+            raise NameError('The package currently do not support missing ' +
+                            'for auto regression. The support has been ' +
+                            'implemented, but deprecated due to efficiency ' +
+                            'issue. Will support this in next version.')
 
         # else we can either modify the feature on the given date, but this
         # requires regenerate the new feature matrix, which might be costly.

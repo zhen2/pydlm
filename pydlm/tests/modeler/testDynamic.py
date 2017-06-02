@@ -9,6 +9,10 @@ class testDynamic(unittest.TestCase):
         self.features = np.matrix(np.random.rand(10, 2)).tolist()
         self.newDynamic = dynamic(features=self.features, w=1.0)
 
+    def testInputNumpyMatrix(self):
+        dynamic(features=np.random.rand(10, 2), w=1.0)
+        pass
+
     def testInitialization(self):
         self.assertEqual(self.newDynamic.d, 2)
         self.assertEqual(self.newDynamic.n, 10)
@@ -34,4 +38,10 @@ class testDynamic(unittest.TestCase):
             np.matrix(self.newDynamic.features)
             - np.matrix(self.features[1:]))), 0)
 
-unittest.main()
+    def testAlter(self):
+        self.newDynamic.alter(1, [0, 0])
+        self.assertAlmostEqual(self.newDynamic.features[1],
+                               [0, 0])
+
+if __name__ == '__main__':
+    unittest.main()

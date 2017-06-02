@@ -32,9 +32,10 @@ Example:
 # Kalman filter functionality for filtering the data
 
 from copy import deepcopy
-from pydlm.func._dlm import _dlm
+from numpy import matrix
 from pydlm.base.tools import getInterval
-
+from pydlm.func._dlm import _dlm
+from pydlm.tuner.dlmTuner import modelTuner
 
 class dlm(_dlm):
     """ The main class of the dynamic linear model.
@@ -260,11 +261,17 @@ class dlm(_dlm):
 
     # One day ahead prediction function
     def predict(self, date=None, featureDict=None):
-        """ One day ahead predict based on the current data for a specific future
-        days.
+        """ One day ahead predict based on the current data.
 
         The predict result is based on all the data before date and predict the
-        observation at date + days.
+        observation at date + days. 
+
+        The prediction could be on the last day and into the future or in 
+        the middle of the time series and ignore the rest. For predicting into
+        the future, the new features must be supplied to featureDict. For 
+        prediction in the middle, the user can still supply the features which
+        will be used priorily. The old features will be used if featureDict is
+        None.
 
         Args:
             date: the index when the prediction based on. Default to the
@@ -290,7 +297,7 @@ class dlm(_dlm):
                             ' after the filtered date')
 
         return self._oneDayAheadPredict(date=date, featureDict=featureDict)
-
+        
     def continuePredict(self, featureDict=None):
         """ Continue prediction after the one-day ahead predict.
 
@@ -303,9 +310,11 @@ class dlm(_dlm):
         >>> myDLM.continuePredict(featureDict=featureDict_day2)
         >>> myDLM.continuePredict(featureDict=featureDict_day3)
 
+        The featureDict acts the same way as in predict().
+
         Args:
             featureDict: the feature set for the dynamic components, stored
-                         in a for of {"component name": feature}. If the set
+                         in a for of {"component name": vector}. If the set
                          was not supplied, then the algo will re-use the old
                          feature. For days beyond the data, the featureDict
                          for every dynamic component must be provided.
@@ -317,6 +326,60 @@ class dlm(_dlm):
             raise NameError('continuePredict has to come after predict.')
 
         return self._continuePredict(featureDict=featureDict)
+
+    # N day ahead prediction
+    def predictN(self, N=1, date=None, featureDict=None):
+        """ N day ahead prediction based on the current data.
+
+        This function is a convenient wrapper of predict() and
+        continuePredict(). If the prediction is into the future, i.e, > n, 
+        the featureDict has to contain all feature vectors for multiple days
+        for each dynamic component. For example, assume myDLM has a component
+        named 'spy' which posseses two dimensions,
+
+        >>> featureDict_3day = {'spy': [[1, 2],[2, 3],[3, 4]]}
+        >>> myDLM.predictN(N=3, featureDict=featureDict_3day)
+
+        Args:
+            N:    The length of days to predict.
+            date: The index when the prediction based on. Default to the
+                  last day.
+            FeatureDict: The feature set for the dynamic Components, in a form
+                  of {"component_name": feature}, where the feature must have
+                  N elements of feature vectors. If the featureDict is not
+                  supplied, then the algo reuse those stored in the dynamic
+                  components. For dates beyond the last day, featureDict must
+                  be supplied.
+
+        Returns:
+            A tuple of two lists. (Predicted observation, variance of the predicted
+            observation)
+
+        """
+        if N < 1:
+            raise NameError('N has to be greater or equal to 1')
+        # Take care if features are numpy matrix
+        if isinstance(featureDict, matrix):
+            featureDict = featureDict.tolist()
+        predictedObs = []
+        predictedVar = []
+
+        # call predict for the first day
+        getSingleDayFeature = lambda f, i: ({k: v[i] for k, v in f.items()}
+                                            if f is not None else None)
+        # Construct the single day featureDict
+        featureDictOneDay = getSingleDayFeature(featureDict, 0)
+        (obs, var) = self.predict(date=date, featureDict=featureDictOneDay)
+        predictedObs.append(obs)
+        predictedVar.append(var)
+
+        # Continue predicting the remaining days
+        for i in range(1, N):
+            featureDictOneDay = getSingleDayFeature(featureDict, i)
+            (obs, var) = self.continuePredict(featureDict=featureDictOneDay)
+            predictedObs.append(obs)
+            predictedVar.append(var)
+        return (predictedObs, predictedVar)
 
 # =========================== result components =============================
 
@@ -350,7 +413,7 @@ class dlm(_dlm):
         """
         # get the working date
         start, end = self._checkAndGetWorkingDates(filterType=filterType)
-
+        end += 1 # To get the result for the last date.
         # get the mean for the fitlered data
         if name == 'main':
             # get out of the matrix form
@@ -370,7 +433,7 @@ class dlm(_dlm):
         self._checkComponent(name)
         return self._getComponentMean(name=name,
                                       filterType=filterType,
-                                      start=start, end=end)
+                                      start=start, end=(end - 1))
 
     def getVar(self, filterType='forwardFilter', name='main'):
         """ get the variance for data or component.
@@ -394,7 +457,7 @@ class dlm(_dlm):
         """
         # get the working date
         start, end = self._checkAndGetWorkingDates(filterType=filterType)
-
+        end += 1
         # get the variance for the time series data
         if name == 'main':
             # get out of the matrix form
@@ -413,7 +476,42 @@ class dlm(_dlm):
         # get the variance for the component
         self._checkComponent(name)
         return self._getComponentVar(name=name, filterType=filterType,
-                                     start=start, end=end)
+                                     start=start, end=(end - 1))
+
+    def getResidual(self, filterType='forwardFilter'):
+        """ get the residuals for data after filtering or smoothing.
+
+        If the working dates are not (0, self.n - 1),
+        then a warning will prompt stating the actual filtered dates.
+
+        Args:
+            filterType: the type of residuals to be returned. Could be
+                        'forwardFilter', 'backwardSmoother', and 'predict'.
+                        Default to 'forwardFilter'.
+
+        Returns:
+            A list of residuals based on the choice
+
+        """
+        # get the working date
+        start, end = self._checkAndGetWorkingDates(filterType=filterType)
+        end += 1 # To get the result for the last date.
+        # get the mean for the fitlered data
+        # get out of the matrix form
+        if filterType == 'forwardFilter':
+            return self._1DmatrixToArray(
+                [self.data[i] - self.result.filteredObs[i]
+                 for i in range(start, end)])
+        elif filterType == 'backwardSmoother':
+            return self._1DmatrixToArray(
+                [self.data[i] - self.result.smoothedObs[i]
+                 for i in range(start, end)])
+        elif filterType == 'predict':
+            return self._1DmatrixToArray(
+                [self.data[i] - self.result.predictedObs[i]
+                 for i in range(start, end)])
+        else:
+            raise NameError('Incorrect filter type.')
 
     def getInterval(self, p=0.95, filterType='forwardFilter', name='main'):
         """ get the confidence interval for data or component.
@@ -439,7 +537,7 @@ class dlm(_dlm):
         """
         # get the working date
         start, end = self._checkAndGetWorkingDates(filterType=filterType)
-
+        end += 1
         # get the mean and the variance for the time series data
         if name == 'main':
             # get out of the matrix form
@@ -466,10 +564,10 @@ class dlm(_dlm):
             self._checkComponent(name)
             compMean = self._getComponentMean(name=name,
                                               filterType=filterType,
-                                              start=start, end=end)
+                                              start=start, end=(end - 1))
             compVar = self._getComponentVar(name=name,
                                             filterType=filterType,
-                                            start=start, end=end)
+                                            start=start, end=(end - 1))
 
         # get the upper and lower bound
         upper, lower = getInterval(compMean, compVar, p)
@@ -497,29 +595,29 @@ class dlm(_dlm):
         """
         # get the working dates
         start, end = self._checkAndGetWorkingDates(filterType=filterType)
-
+        end += 1
         # to return the full latent states
         if name == 'all':
             if filterType == 'forwardFilter':
-                return map(lambda x: x if x is None
-                           else self._1DmatrixToArray(x),
-                           self.result.filteredState[start:end])
+                return list(map(lambda x: x if x is None
+                                else self._1DmatrixToArray(x),
+                                self.result.filteredState[start:end]))
             elif filterType == 'backwardSmoother':
-                return map(lambda x: x if x is None
-                           else self._1DmatrixToArray(x),
-                           self.result.smoothedState[start:end])
+                return list(map(lambda x: x if x is None
+                                else self._1DmatrixToArray(x),
+                                self.result.smoothedState[start:end]))
             elif filterType == 'predict':
-                return map(lambda x: x if x is None
-                           else self._1DmatrixToArray(x),
-                           self.result.smoothedState[start:end])
+                return list(map(lambda x: x if x is None
+                                else self._1DmatrixToArray(x),
+                                self.result.smoothedState[start:end]))
             else:
                 raise NameError('Incorrect filter type.')
 
         # to return the latent state for a given component
         self._checkComponent(name)
-        return map(lambda x: x if x is None else self._1DmatrixToArray(x),
-                   self._getLatentState(name=name, filterType=filterType,
-                                        start=start, end=end))
+        return list(map(lambda x: x if x is None else self._1DmatrixToArray(x),
+                        self._getLatentState(name=name, filterType=filterType,
+                                             start=start, end=(end - 1))))
 
     def getLatentCov(self, filterType='forwardFilter', name='all'):
         """ get the error covariance for different components and
@@ -544,7 +642,7 @@ class dlm(_dlm):
         """
         # get the working dates
         start, end = self._checkAndGetWorkingDates(filterType=filterType)
-
+        end += 1
         # to return the full latent covariance
         if name == 'all':
             if filterType == 'forwardFilter':
@@ -559,7 +657,7 @@ class dlm(_dlm):
         # to return the latent covariance for a given component
         self._checkComponent(name)
         return self._getLatentCov(name=name, filterType=filterType,
-                                  start=start, end=end)
+                                  start=start, end=(end - 1))
 
 # ======================= data appending, popping and altering ===============
 
@@ -575,6 +673,10 @@ class dlm(_dlm):
                        component.
 
         """
+        # initialize the model to ease the modification
+        if not self.initialized:
+            self._initialize()
+            
         # if we are adding new data to the time series
         if component == 'main':
             # add the data to the self.data
@@ -617,6 +719,10 @@ class dlm(_dlm):
             raise NameError('The date should be between 0 and ' +
                             str(self.n - 1))
 
+        # initialize the model to ease the modification
+        if not self.initialized:
+            self._initialize()
+
         # pop out the data at date
         self.data.pop(date)
         self.n -= 1
@@ -649,7 +755,9 @@ class dlm(_dlm):
 
         Args:
             date: the date of the altering data
-            data: the new data
+            data: the new data. data must be a numeric value for main time
+                  series and must be a list of numerical values for dynamic
+                  components.
             component: the component for which the new data need to be
                        supplied to.\n
                        'main': the main time series data\n
@@ -659,6 +767,10 @@ class dlm(_dlm):
         if date < 0 or date > self.n - 1:
             raise NameError('The date should be between 0 and ' +
                             str(self.n - 1))
+
+        # initialize the model to ease the modification
+        if not self.initialized:
+            self._initialize()
 
         # to alter the data for the observed chain
         if component == 'main':
@@ -672,7 +784,7 @@ class dlm(_dlm):
         # to alter the feature of a component
         elif component in self.builder.dynamicComponents:
             comp = self.builder.dynamicComponents[component]
-            comp.features[component] = data
+            comp.alter(date, data)
 
         else:
             raise NameError('Such dynamic component does not exist.')
@@ -1063,3 +1175,37 @@ class dlm(_dlm):
             global dlmPlot
             import pydlm.plot.dlmPlot as dlmPlot
             self.plotLibLoaded = True
+            
+# ========================= tuning and evaluation =========================
+    def getMSE(self):
+        """ Get the one-day ahead prediction mean square error. The mse is
+        estimated only for days that has been predicted.
+
+        Returns:
+            An numerical value
+        """
+
+        return self._getMSE()
+
+    def tune(self, maxit=100):
+        """ Automatic tuning of the discounting factors. 
+
+        The method will call the model tuner class to use the default parameters
+        to tune the discounting factors and change the discount factor permenantly.
+        User needs to refit the model after tuning.
+        
+        If user wants a more refined tuning and not change any property of the
+        existing model, they should opt to use the @modelTuner class.
+        """
+        simpleTuner = modelTuner()
+
+        if self._printInfo:
+            self.fitForwardFilter()
+            print("The current mse is " + str(self.getMSE()) + '.')
+        
+        simpleTuner.tune(untunedDLM=self, maxit=maxit)
+        self._setDiscounts(simpleTuner.getDiscounts(), change_component=True)
+        
+        if self._printInfo:
+            self.fitForwardFilter()
+            print("The new mse is " + str(self.getMSE()) + '.')

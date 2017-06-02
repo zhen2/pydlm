@@ -133,6 +133,7 @@ class _dlm:
             # record the current prediction status in the form of
             # [start date, current date, [predictedObs1, predictedObs2,...]]
             self.predictStatus = None
+            # One day ahead prediction squared error
 
         # extend the current record by n blocks
         def _appendResult(self, n):
@@ -150,11 +151,6 @@ class _dlm:
 
         """
         self.builder.initialize(noise=self.options.noise)
-        # if self.options.shrink == 'auto':
-        #    self.Filter = kalmanFilter(discount = self.builder.discount,
-        #                           shrink = 1 - min(self.builder.discount),
-        #                           shrinkageMatrix = self.builder.sysVarPrior)
-        # else:
         self.Filter = kalmanFilter(discount=self.builder.discount,
                                    updateInnovation=self.options.innovationType,
                                    index=self.builder.componentIndex)
@@ -201,17 +197,6 @@ class _dlm:
         # to see if the ff need to run or not
         if start > end:
             return None
-
-        # also we need to make we save consectively
-#        if save == 'all' and start > self.result.filteredSteps[1] + 1:
-#            raise NameError('The data before start date has yet to be
-#                            filtered!')
-
-        # for rolling window run, we need to make sure the saved
-        #  date is consecutive
-#        if save != 'all' and end > self.result.filteredSteps[1] + 1:
-#            raise NameError('The previous date needs to be filtered'
-#                           + ' for rolling window!')
 
         # first we need to initialize the model to the correct status
         # if the start point is 0 or we want to forget the previous result
@@ -371,14 +356,23 @@ class _dlm:
 
         return (predictedObs, predictedObsVar)
 
-    # feature set contains all the features for prediction.
+    # featureDict contains all the features for prediction.
     # It is a dictionary with key equals to the name of the component and
     # the value as the new feature (a list). The function
     # will first use the features provided in this feature dict, if not
     # found, it will fetch the default feature from the component. If
     # it could not find feature for some component, it returns an error
+    # The intermediate result will be stored in result.predictStatus as
+    # (start_date, next_pred_date, [all_predicted_values]), which will be
+    # used by _continuePredict.
     def _oneDayAheadPredict(self, date, featureDict=None):
         """ One day ahead prediction based on the date and the featureDict.
+        The prediction could be on the last day and into the future or in 
+        the middle of the time series and ignore the rest. For predicting into
+        the future, the new features must be supplied to featureDict. For 
+        prediction in the middle, the user can still supply the features which
+        will be used priorily. The old features will be used if featureDict is
+        None.
 
         Args:
             date: the prediction starts (based on the observation before and
@@ -417,7 +411,8 @@ class _dlm:
         """ Continue predicting one day after _oneDayAheadPredict or
         after _continuePredict. After using
         _oneDayAheadPredict, the user can continue predicting by using
-        _continuePredict and the new featureDict.
+        _continuePredict. The featureDict act the same as in
+        _oneDayAheadPredict.
 
         Args:
             featureDict: the new feature value for some dynamic components.
@@ -432,12 +427,15 @@ class _dlm:
         currentDate = self.result.predictStatus[1]
 
         # need to take care of the automaticComponents, especially the
-        # auto regressive component.
+        # auto regressive component. The newly predicted value becomes
+        # the new feature for autoReg components. We need to artifically
+        # construct the feature for autoReg. These values are stored
+        # in result.predictStatus[2]
         for name in self.builder.automaticComponents:
             comp = self.builder.automaticComponents[name]
             if comp.componentType != 'autoReg':
                 continue
-            if len(self.result.predictStatus[2]) >= comp.d:
+            elif len(self.result.predictStatus[2]) >= comp.d:
                 feature = self.result.predictStatus[2][-comp.d:]
             else:
                 extra = comp.d - len(self.predictStatus[2])
@@ -445,7 +443,6 @@ class _dlm:
                                     (currentDate + 1)] + self.result.predictStatus[2]
             if featureDict is None:
                 featureDict = {}
-
             featureDict[name] = feature
 
         self._constructEvaluationForPrediction(featureDict=featureDict,
@@ -476,43 +473,31 @@ class _dlm:
         if featureDict is None and date is None:
             raise NameError('FeatureDict and date cannot be None ' +
                             'at the same time.')
-
         # find the correct evaluation vector
         if featureDict is None:
             self.builder.updateEvaluation(date)
         else:
-            for i in self.builder.dynamicComponents:
-                if i in featureDict:
-                    self.builder.model.evaluation[
-                        0, self.builder.componentIndex[i][0]:
-                        (self.builder.componentIndex[i][1] + 1)] = featureDict[i]
-                else:
-                    if date is None:
-                        raise NameError('Both date and featureDict are ' +
-                                        'not provided for component ' +
-                                        i)
-                    comp = self.builder.dynamicComponents[i]
-                    comp.updateEvaluation(date)
-                    self.builder.model.evaluation[
-                        0, self.builder.componentIndex[i][0]:
-                        (self.builder.componentIndex[i][1] + 1)] = comp.evaluation
-
-            for i in self.builder.automaticComponents:
-                if i in featureDict:
-                    self.builder.model.evaluation[
-                        0, self.builder.componentIndex[i][0]:
-                        (self.builder.componentIndex[i][1] + 1)] = featureDict[i]
-                else:
-                    if date is None:
-                        raise NameError('Both date and featureDict are ' +
-                                        'not provided for component ' +
-                                        i)
-                    comp = self.builder.automaticComponents[i]
-                    comp.updateEvaluation(date)
-                    self.builder.model.evaluation[
-                        0, self.builder.componentIndex[i][0]:
-                        (self.builder.componentIndex[i][1] + 1)] = comp.evaluation
+            self._updateFeatureValues(
+                date, featureDict, self.builder.automaticComponents)
+            self._updateFeatureValues(
+                date, featureDict, self.builder.dynamicComponents)
         self.builder.model.evaluation = matrix(self.builder.model.evaluation)
+
+    def _updateFeatureValues(self, date, featureDict, componentCollection):
+        for name in componentCollection:
+            if name in featureDict:
+                self.builder.model.evaluation[
+                    0, self.builder.componentIndex[name][0]:
+                    (self.builder.componentIndex[name][1] + 1)] = featureDict[name]
+            else:
+                if date is None:
+                    raise NameError('The feature of ' + name + ' is lacking, '
+                                    'but the date is not provided.')
+                comp = componentCollection[name]
+                comp.updateEvaluation(date)
+                self.builder.model.evaluation[
+                    0, self.builder.componentIndex[name][0]:
+                    (self.builder.componentIndex[name][1] + 1)] = comp.evaluation
 
 # =========================== model helper function ==========================
 
@@ -818,3 +803,58 @@ class _dlm:
 
         if self.result.smoothedSteps[1] == -1:
             self.options.plotSmoothedData = False
+
+#====================== function for discount tuning =========================
+    # get the mse from the model
+    def _getMSE(self):
+        
+        if not self.initialized:
+            raise NameError('need to fit the model first')
+
+        if self.result.filteredSteps[1] == -1:
+            raise NameError('need to run forward filter first')
+
+        mse = 0
+        for i in range(self.result.filteredSteps[0],
+                       self.result.filteredSteps[1] + 1):
+            mse += (self.data[i] - self.result.predictedObs[i]) ** 2
+
+        mse = mse / (self.result.filteredSteps[1] + 1 -
+                      self.result.filteredSteps[0])
+        return mse[0,0]
+
+    # get the discount from the model
+    def _getDiscounts(self):
+        
+        if not self.initialized:
+            raise NameError('need to fit the model before one can' +
+                            'fetch the discount factors')
+
+        discounts = []
+        for comp in self.builder.componentIndex:
+            indx = self.builder.componentIndex[comp]
+            discounts.append(self.builder.discount[indx[0]])
+        return discounts
+
+    # set the model discount, this should never expose to the user
+    # change the discount in the component would change the whole model.
+    # change those in filter and builder only change the discounts
+    # temporarily and will be corrected if we rebuild the model.
+    def _setDiscounts(self, discounts, change_component=False):
+
+        if not self.initialized:
+            raise NameError('need to fit the model first')
+
+        for i, comp in enumerate(self.builder.componentIndex):
+            indx = self.builder.componentIndex[comp]
+            self.builder.discount[indx[0]: (indx[1] + 1)] = discounts[i]
+            if change_component:
+                component = self._fetchComponent(name=comp)
+                component.discount = self.builder.discount[indx[0]: (indx[1] + 1)]
+
+        self.Filter.updateDiscount(self.builder.discount)
+        self.result.filteredSteps = [0, -1]
+
+    # whether to show the internal message
+    def showInternalMessage(self, show=True):
+        self._printInfo = show
